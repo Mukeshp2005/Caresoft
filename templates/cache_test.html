@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Cache Test - CareSoft</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+
+        .test-box {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }
+
+        .success {
+            color: #28a745;
+            font-weight: bold;
+        }
+
+        .error {
+            color: #dc3545;
+            font-weight: bold;
+        }
+
+        .info {
+            background: #e7f3ff;
+            padding: 15px;
+            border-left: 4px solid #2196F3;
+            margin: 20px 0;
+        }
+
+        button {
+            background: #6C5CE7;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 5px;
+        }
+
+        button:hover {
+            background: #5849c7;
+        }
+
+        .code {
+            background: #f4f4f4;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: monospace;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="test-box">
+        <h1>🧪 CareSoft Cache Test Page</h1>
+        <p>This page will help you verify if the JavaScript is loading correctly.</p>
+
+        <div class="info">
+            <strong>📝 Instructions:</strong><br>
+            1. Check the test results below<br>
+            2. If you see "OLD VERSION", clear your browser cache<br>
+            3. If you see "NEW VERSION", everything is working!
+        </div>
+
+        <h2>Test Results:</h2>
+        <div id="test-results"></div>
+
+        <h2>Quick Cache Clear Methods:</h2>
+        <div class="code">
+            <strong>Windows/Linux:</strong> Ctrl + Shift + R or Ctrl + F5<br>
+            <strong>Mac:</strong> Cmd + Shift + R<br>
+            <strong>Or:</strong> Open in Incognito/Private window
+        </div>
+
+        <button onclick="location.reload(true)">🔄 Hard Reload This Page</button>
+        <button onclick="window.location.href='http://localhost:8000'">🏠 Go to Main App</button>
+    </div>
+
+    <script>
+        // Test if the new JavaScript functions exist
+        const results = document.getElementById('test-results');
+
+        // Check if we can access the main app's JavaScript
+        fetch('/static/js/app.js?v=3.0')
+            .then(response => response.text())
+            .then(code => {
+                let html = '<div class="test-box">';
+
+                // Test 1: Check for updated createNewBranch function
+                if (code.includes('const result = await response.json()') &&
+                    code.includes('if (result.status === "error")')) {
+                    html += '<p class="success">✅ TEST 1 PASSED: createNewBranch function is UPDATED</p>';
+                } else {
+                    html += '<p class="error">❌ TEST 1 FAILED: createNewBranch function is OLD VERSION</p>';
+                }
+
+                // Test 2: Check for updated deleteNode function
+                if (code.includes('const result = await response.json()') &&
+                    code.includes('deleteNode')) {
+                    html += '<p class="success">✅ TEST 2 PASSED: deleteNode function is UPDATED</p>';
+                } else {
+                    html += '<p class="error">❌ TEST 2 FAILED: deleteNode function is OLD VERSION</p>';
+                }
+
+                // Test 3: Check for event.stopPropagation in buildNodeHtml
+                if (code.includes('event.stopPropagation(); createNewBranch')) {
+                    html += '<p class="success">✅ TEST 3 PASSED: Event handling is UPDATED</p>';
+                } else {
+                    html += '<p class="error">❌ TEST 3 FAILED: Event handling is OLD VERSION</p>';
+                }
+
+                // Test 4: Check file size (new version should be larger)
+                const fileSize = new Blob([code]).size;
+                html += `<p class="info">📊 JavaScript file size: ${fileSize} bytes</p>`;
+
+                if (fileSize > 41000) {
+                    html += '<p class="success">✅ TEST 4 PASSED: File size indicates NEW VERSION</p>';
+                } else {
+                    html += '<p class="error">❌ TEST 4 FAILED: File size indicates OLD VERSION</p>';
+                }
+
+                html += '</div>';
+
+                // Overall result
+                if (code.includes('const result = await response.json()') &&
+                    code.includes('event.stopPropagation(); createNewBranch')) {
+                    html += '<div class="test-box" style="background: #d4edda; border: 2px solid #28a745;">';
+                    html += '<h2 class="success">🎉 ALL TESTS PASSED!</h2>';
+                    html += '<p>The JavaScript is loading the NEW VERSION correctly.</p>';
+                    html += '<p><strong>You can now use the main application!</strong></p>';
+                    html += '<button onclick="window.location.href=\'http://localhost:8000\'">🚀 Open Main App</button>';
+                    html += '</div>';
+                } else {
+                    html += '<div class="test-box" style="background: #f8d7da; border: 2px solid #dc3545;">';
+                    html += '<h2 class="error">⚠️ CACHE ISSUE DETECTED</h2>';
+                    html += '<p>Your browser is still loading the OLD VERSION.</p>';
+                    html += '<p><strong>Please clear your browser cache using one of these methods:</strong></p>';
+                    html += '<ol>';
+                    html += '<li><strong>Hard Refresh:</strong> Ctrl+Shift+R (Windows/Linux) or Cmd+Shift+R (Mac)</li>';
+                    html += '<li><strong>Incognito Mode:</strong> Open http://localhost:8000 in a private window</li>';
+                    html += '<li><strong>Clear Cache:</strong> Browser Settings → Clear browsing data → Cached images and files</li>';
+                    html += '</ol>';
+                    html += '</div>';
+                }
+
+                results.innerHTML = html;
+            })
+            .catch(error => {
+                results.innerHTML = '<div class="test-box"><p class="error">❌ Error loading JavaScript file: ' + error + '</p></div>';
+            });
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: caresoft_postgres
+    environment:
+      POSTGRES_USER: caresoft_user
+      POSTGRES_PASSWORD: caresoft_password
+      POSTGRES_DB: caresoft_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U caresoft_user -d caresoft_db" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build: .
+    container_name: caresoft_web
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://caresoft_user:caresoft_password@db:5432/caresoft_db
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+ 

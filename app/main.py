@@ -1,60 +1,41 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from sqlalchemy.orm import Session
 from typing import List, Optional, Dict
 import uuid
 import time
+
+from app.database import engine, get_db, Base
+from app import crud
+from app.crud import Node, ConfigState
+from app.models import NodeModel
 
 app = FastAPI(title="CareSoft Hardcore VAVE Hub - Pure Engineering")
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
-# --- DATA MODELS ---
 
-class Node(BaseModel):
-    id: str
-    name: str
-    display_id: str = ""
-    level: int
-    own_cost: float = 0.0
-    weight: float = 0.0 # grams
-    quantity: int = 1
-    material_calc_enabled: bool = True
-    material: str = "Unassigned"
-    children: List['Node'] = []
-    config: Dict = {} # To store technical specs like fuel, drive, etc.
-    status: str = "In-Progress" # "In-Progress" or "Completed"
-    
-    # Computed result fields
-    total_cost: float = 0.0
-    total_weight: float = 0.0
-    co2_footprint: float = 0.0
+# Create database tables on startup
+Base.metadata.create_all(bind=engine)
 
-Node.model_rebuild()
-
-class ConfigState(BaseModel):
-    brand: str = "TATA"
-    model: str = "Punch"
-    year: int = 2024
-    fuel_type: str = "Petrol"  # Petrol, Diesel, EV, Hybrid
-    trans_type: str = "Automatic"  # Automatic, Manual
-    drive_type: str = "FWD"  # FWD, RWD, AWD
-    body_style: str = "Sedan"  # Sedan, SUV, Hatchback, Pickup, Van
-    steering_side: str = "RHD"  # RHD, LHD
-
-# GLOBAL STATE
-current_config = ConfigState()
-PROJECTS = {} # Store multiple projects: {id: Node}
+# GLOBAL STATE (for current session only)
 current_project_id = None
 
-def get_active_project() -> Node:
+def get_active_project(db: Session) -> Optional[Node]:
     global current_project_id
-    if not current_project_id and PROJECTS:
-        current_project_id = list(PROJECTS.keys())[0]
-    return PROJECTS.get(current_project_id)
+    if not current_project_id:
+        # Get the first project if none is selected
+        projects = crud.get_all_projects(db)
+        if projects:
+            current_project_id = projects[0].id
+    
+    if current_project_id:
+        return crud.get_project_tree(db, current_project_id)
+    return None
+
 
 # MATERIAL & CO2 MASTER (Local Economics)
 MATERIAL_MASTER = {
@@ -333,30 +314,37 @@ def find_node(node: Node, target_id: str) -> Optional[Node]:
 async def read_root(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
+@app.get("/cache-test", response_class=HTMLResponse)
+async def cache_test(request: Request):
+    return templates.TemplateResponse("cache_test.html", {"request": request})
+
 @app.get("/api/tree")
-async def get_tree():
-    root = get_active_project()
+async def get_tree(db: Session = Depends(get_db)):
+    root = get_active_project(db)
     if root:
         calculate_totals(root)
     return root
 
 @app.get("/api/projects")
-async def list_projects():
-    # Ensure totals are calculated for display
+async def list_projects(db: Session = Depends(get_db)):
+    # Get all projects from database
+    projects = crud.get_all_projects(db)
     summary = []
-    for p_id in PROJECTS:
-        p = PROJECTS[p_id]
-        calculate_totals(p)
-        summary.append({
-            "id": p_id, 
-            "name": p.name, 
-            "total_cost": p.total_cost, 
-            "total_weight": p.total_weight,
-            "config": p.config,
-            "status": p.status,
-            "part_count": count_nodes(p),
-            "tracked_parts": count_tracked_parts(p)
-        })
+    for project in projects:
+        # Get the tree for calculation
+        tree = crud.get_project_tree(db, project.id)
+        if tree:
+            calculate_totals(tree)
+            summary.append({
+                "id": project.id, 
+                "name": project.name, 
+                "total_cost": tree.total_cost, 
+                "total_weight": tree.total_weight,
+                "config": project.config,
+                "status": project.status,
+                "part_count": count_nodes(tree),
+                "tracked_parts": count_tracked_parts(tree)
+            })
     return summary
 
 def count_nodes(node: Node) -> int:
@@ -380,24 +368,27 @@ def reset_costs(node: Node):
         reset_costs(child)
 
 @app.post("/api/project/new")
-async def new_project(req: ConfigState):
-    global current_config, current_project_id
-    current_config = req
-    p_id = f"prog_{int(time.time())}"
+async def new_project(req: ConfigState, db: Session = Depends(get_db)):
+    global current_project_id
+    
+    # Build the tree structure
     new_tree = build_full_tree(req)
-    new_tree.id = p_id
-    new_tree.name = f"{req.brand} {req.model} ({req.year})"
-    new_tree.config = req.dict() # Store the config directly in the project
+    project_name = f"{req.brand} {req.model} ({req.year})"
+    
+    # Create project in database
+    project = crud.create_project(db, project_name, req)
+    
+    # Reset costs and save tree to database
     reset_costs(new_tree)
-    PROJECTS[p_id] = new_tree
-    current_project_id = p_id
-    return {"status": "success", "id": p_id}
+    new_tree.id = project.id
+    crud.save_tree_to_db(db, new_tree, project.id)
+    
+    current_project_id = project.id
+    return {"status": "success", "id": project.id}
 
 @app.post("/api/config")
 async def update_config(config: ConfigState):
-    global current_config, cached_tree
-    current_config = config
-    cached_tree = build_full_tree(config)
+    # This endpoint might not be needed anymore with DB
     return {"status": "success"}
 
 @app.get("/api/materials")
@@ -411,35 +402,54 @@ async def update_materials(req: Dict[str, float]):
     return {"status": "success"}
 
 @app.post("/api/node/update")
-async def update_node(req: dict):
-    root = get_active_project()
-    if root:
-        node = find_node(root, req['id'])
-        if node:
-            if 'own_cost' in req: node.own_cost = req['own_cost']
-            if 'weight' in req: node.weight = req['weight']
-            if 'quantity' in req: node.quantity = req['quantity']
-            if 'material' in req: node.material = req['material']
-            if 'material_calc_enabled' in req: node.material_calc_enabled = req['material_calc_enabled']
-            return {"status": "success"}
+async def update_node(req: dict, db: Session = Depends(get_db)):
+    global current_project_id
+    if not current_project_id:
+        return {"status": "error", "message": "No active project"}
+    
+    # Update the node in database
+    updates = {}
+    if 'own_cost' in req: updates['own_cost'] = req['own_cost']
+    if 'weight' in req: updates['weight'] = req['weight']
+    if 'quantity' in req: updates['quantity'] = req['quantity']
+    if 'material' in req: updates['material'] = req['material']
+    if 'material_calc_enabled' in req: updates['material_calc_enabled'] = req['material_calc_enabled']
+    
+    node = crud.update_node(db, req['id'], updates)
+    if node:
+        return {"status": "success"}
     return {"status": "error"}
 
 @app.post("/api/node/add")
-async def add_node(req: dict):
-    root = get_active_project()
-    if root:
-        parent = find_node(root, req['parent_id'])
-        if parent:
-            new_id = f"{parent.id}-n-{len(parent.children)}"
-            new_node = Node(
-                id=new_id,
-                name=req.get('name', 'New Branch/Part'),
-                level=parent.level + 1,
-                material_calc_enabled=req.get('material_calc_enabled', True)
-            )
-            parent.children.append(new_node)
-            return {"status": "success", "new_id": new_id}
-    return {"status": "error"}
+async def add_node(req: dict, db: Session = Depends(get_db)):
+    global current_project_id
+    if not current_project_id:
+        return {"status": "error", "message": "No active project"}
+    
+    # Get parent node to determine new node details
+    parent = crud.get_node(db, req['parent_id'])
+    if not parent:
+        return {"status": "error", "message": "Parent node not found"}
+    
+    # Get children count for unique ID
+    children_count = db.query(NodeModel).filter(
+        NodeModel.parent_id == parent.id
+    ).count()
+    
+    new_id = f"{parent.id}-n-{children_count}"
+    new_node = Node(
+        id=new_id,
+        name=req.get('name', 'New Branch/Part'),
+        level=parent.level + 1,
+        material_calc_enabled=req.get('material_calc_enabled', True)
+    )
+    
+    # Save to database
+    db_node = crud.create_node(db, new_node, current_project_id, parent.id)
+    if db_node:
+        return {"status": "success", "new_id": new_id}
+    return {"status": "error", "message": "Failed to create node"}
+
 
 def delete_from_tree(node: Node, target_id: str):
     for i, child in enumerate(node.children):
@@ -451,31 +461,43 @@ def delete_from_tree(node: Node, target_id: str):
     return False
 
 @app.post("/api/project/complete")
-async def complete_project(req: dict):
-    root = get_active_project()
-    if root:
-        root.status = "Completed"
-        return {"status": "success"}
+async def complete_project(req: dict, db: Session = Depends(get_db)):
+    project_id = req.get("id") or current_project_id
+    if project_id:
+        project = crud.update_project_status(db, project_id, "Completed")
+        if project:
+            return {"status": "success"}
     return {"status": "error"}
 
 @app.post("/api/project/delete")
-async def delete_project(req: dict):
+async def delete_project(req: dict, db: Session = Depends(get_db)):
     global current_project_id
     p_id = req.get("id")
-    if p_id in PROJECTS:
-        del PROJECTS[p_id]
+    if crud.delete_project(db, p_id):
         if current_project_id == p_id:
             current_project_id = None
         return {"status": "success"}
     return {"status": "error"}
 
 @app.post("/api/node/delete")
-async def delete_node_api(req: dict):
-    root = get_active_project()
-    if not root: return {"status": "error"}
-    if req['id'] == "v-root": return {"status": "error", "message": "Cannot delete root"}
-    success = delete_from_tree(root, req['id'])
+async def delete_node_api(req: dict, db: Session = Depends(get_db)):
+    node_id = req.get('id')
+    if not node_id:
+        return {"status": "error", "message": "No node ID provided"}
+    
+    # Get the node to check if it's a root node
+    node = crud.get_node(db, node_id)
+    if not node:
+        return {"status": "error", "message": "Node not found"}
+    
+    # Check if this is a root node (no parent)
+    if node.parent_id is None:
+        return {"status": "error", "message": "Cannot delete root node"}
+    
+    success = crud.delete_node(db, node_id)
     return {"status": "success" if success else "error"}
+
+
 
 if __name__ == "__main__":
     import uvicorn

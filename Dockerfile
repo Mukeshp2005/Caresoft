@@ -1,20 +1,32 @@
-# Use the official Python base image
+clear# Use the official Python base image
 FROM python:3.11-slim
 
 # Set the working directory inside the container
 WORKDIR /app
 
-# Install system dependencies for psycopg2 (PostgreSQL)
+# Install system dependencies for psycopg2 (PostgreSQL) and Poetry
 RUN apt-get update && apt-get install -y \
     libpq-dev \
     gcc \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the requirements file first to leverage Docker cache
-COPY requirements.txt .
+# Install Poetry
+RUN curl -sSL https://install.python-poetry.org | python3 - && \
+    ln -s /root/.local/bin/poetry /usr/local/bin/poetry
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Configure Poetry to not create virtual environments (we're already in a container)
+ENV POETRY_VIRTUALENVS_CREATE=false \
+    POETRY_NO_INTERACTION=1 \
+    POETRY_CACHE_DIR=/tmp/poetry_cache
+
+# Copy Poetry configuration files
+COPY pyproject.toml poetry.lock* ./
+
+# Install dependencies using Poetry
+# --no-root: Don't install the project itself, just dependencies
+# --only main: Only install main dependencies, not dev dependencies (for production)
+RUN poetry install --no-root --only main && rm -rf $POETRY_CACHE_DIR
 
 # Copy the rest of the application code
 COPY . .

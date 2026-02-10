@@ -180,7 +180,7 @@ function buildNodeHtml(node, isReadOnly = false) {
                 <span class="node-name flex-grow-1">${displayNum}${node.name}</span>
                 <span class="node-price mx-2">₹${Math.round(node.total_cost).toLocaleString()}</span>
                 ${!isReadOnly ? `
-                <button class="btn btn-sm text-primary p-0 mr-2" onclick="createNewBranch(event, '${node.id}')">
+                <button class="btn btn-sm text-primary p-0 mr-2" onclick="event.stopPropagation(); createNewBranch(event, '${node.id}')">
                     <i class="fa fa-plus-circle"></i>
                 </button>
                 ` : ''}
@@ -360,18 +360,49 @@ async function createNewBranch(event, parentId) {
     const name = prompt("Enter Name for new Branch:");
     if (!name) return;
     const isMetal = confirm("Enable metal calculation logic for this part?");
-    await fetch('/api/node/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parent_id: parentId, name: name, material_calc_enabled: isMetal }) });
+
+    const response = await fetch('/api/node/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            parent_id: parentId,
+            name: name,
+            material_calc_enabled: isMetal
+        })
+    });
+
+    const result = await response.json();
+
+    if (result.status === "error") {
+        alert(result.message || "Failed to create node");
+        return;
+    }
+
     await loadTree();
     selectNode(parentId);
 }
 
+
 async function deleteNode(id) {
-    if (id === "v-root") return alert("Root vehicle cannot be deleted!");
     if (!confirm("Remove this branch and all its costs?")) return;
-    await fetch('/api/node/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id }) });
+
+    const response = await fetch('/api/node/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: id })
+    });
+
+    const result = await response.json();
+
+    if (result.status === "error") {
+        alert(result.message || "Cannot delete this node");
+        return;
+    }
+
     await loadTree();
     selectNode(currentTreeData.id);
 }
+
 
 async function startNewProject() {
     $('#projectModal').modal('show');
