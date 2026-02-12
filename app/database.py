@@ -4,7 +4,13 @@ from sqlalchemy.orm import sessionmaker
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+try:
+    load_dotenv()
+except OSError:
+    # On some systems (like macOS with Docker bind mounts), this can fail with 
+    # "Resource deadlock avoided" (Errno 35). We ignore it since environment 
+    # variables are often already set via docker-compose.
+    pass
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://caresoft_user:caresoft_password@localhost:5432/caresoft_db")
 

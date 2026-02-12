@@ -10,6 +10,32 @@ let currentTreeData = null;
 const ActivityLogs = [];
 let charts = {};
 
+// --- RBAC CONFIGURATION (JENKINS STYLE) ---
+const PERMISSION_GROUPS = {
+    "Core Access": {
+        "Create": "Can create new projects and sub-assemblies",
+        "Read": "Can view project trees and cost reports",
+        "Update": "Can modify costs, weights and materials",
+        "Delete": "Can remove projects and specific nodes"
+    }
+};
+
+let MockRoles = {
+    "admin": { description: "Full system administrator with unrestricted access.", status: "active", permissions: ["*"], immutable: true, created: "System", modified: "System", users: 1 },
+    "Viewer": { description: "Read-only access across all modules.", status: "active", permissions: ["Core Access.Read"], created: "Feb 01, 2026", modified: "Feb 10, 2026", users: 3 },
+    "Editor": { description: "Role for engineers to build and manage project costs.", status: "active", permissions: ["Core Access.Read", "Core Access.Update", "Core Access.Create"], created: "Feb 05, 2026", modified: "Just now", users: 2 }
+};
+
+let CURRENT_SELECTED_ROLE = null;
+
+let CURRENT_USER = { username: null, role: null, permissions: [] };
+let MockUsers = {
+    "admin": { pass: "admin123", role: "admin" },
+    "editor": { pass: "123", role: "Editor" },
+    "viewer": { pass: "123", role: "Viewer" }
+};
+const DEFAULT_PASS = "123";
+
 // --- VIEW MANAGEMENT ---
 function toggleSidebar() {
     $('.main-container').toggleClass('sidebar-collapsed');
@@ -25,6 +51,9 @@ function showView(viewName) {
     window.scrollTo(0, 0); // Reset window scroll for the long page
     $('.nav-item').removeClass('active');
 
+    // Highlights the correct nav item
+    $(`.nav-item[onclick="showView('${viewName}')"]`).addClass('active');
+
     if (viewName === 'hub') {
         loadProjectsForHub();
     } else if (viewName === 'editor') {
@@ -33,7 +62,102 @@ function showView(viewName) {
         renderReview();
     } else if (viewName === 'reporting') {
         renderReporting();
+    } else if (viewName === 'login') {
+        $('#login-error').hide();
+    } else if (viewName === 'admin-panel') {
+        const $panel = $('#view-admin-panel');
+        // Relax check to allow anyone with admin role or '*' permission
+        if (CURRENT_USER.role !== 'admin' && !CURRENT_USER.permissions.includes('*')) {
+            showFlash("Administrative privileges required to access the role engine.", "danger");
+            showView('hub');
+            return;
+        }
+        $panel.css('display', 'flex'); // Force flex layout for enterprise view
+        renderAdminEnterprisePortal();
     }
+}
+
+// --- AUTH & RBAC GUARDS ---
+function hasPermission(permission) {
+    if (!CURRENT_USER.role) return false;
+    if (CURRENT_USER.role === 'admin') return true;
+    const roleConfig = MockRoles[CURRENT_USER.role];
+    if (!roleConfig) return false;
+    return roleConfig.permissions.includes('*') || roleConfig.permissions.includes(permission);
+}
+
+function checkPermission(permission, actionDesc = "") {
+    if (!hasPermission(permission)) {
+        if (actionDesc) {
+            showFlash(`RESTRICTED: You do not have permission to ${actionDesc}.`, 'danger');
+        }
+        return false;
+    }
+    return true;
+}
+
+function showFlash(message, type = 'info') {
+    const icon = type === 'danger' ? 'fa-shield-halved' : 'fa-info-circle';
+    const toast = $(`
+        <div class="flash-toast animate__animated animate__slideInRight">
+            <i class="fa ${icon} ${type === 'danger' ? 'text-danger' : 'text-primary'}" style="font-size: 1.2rem;"></i>
+            <div>
+                <div class="font-weight-bold" style="font-size: 0.9rem;">${type === 'danger' ? 'SECURITY ALERT' : 'SYSTEM NOTIFICATION'}</div>
+                <div class="small">${message}</div>
+            </div>
+        </div>
+    `);
+    $('#flash-container').append(toast);
+    setTimeout(() => {
+        toast.addClass('animate__slideOutRight');
+        setTimeout(() => toast.remove(), 500);
+    }, 4000);
+}
+
+async function handleUserLogin() {
+    const userInput = $('#login-username').val();
+    const pass = $('#login-password').val();
+
+    let authenticated = false;
+    let userRole = null;
+
+    if (MockUsers[userInput] && MockUsers[userInput].pass === pass) {
+        authenticated = true;
+        userRole = MockUsers[userInput].role;
+    }
+
+    if (authenticated) {
+        CURRENT_USER = {
+            username: userInput,
+            role: userRole,
+            permissions: MockRoles[userRole] ? MockRoles[userRole].permissions : ['*']
+        };
+
+        // Notify Backend of User Login & Workspace Initialization
+        try {
+            await fetch('/api/auth/initialize', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: userInput, role: userRole })
+            });
+        } catch (e) { console.error("Workspace init failed", e); }
+
+        showFlash(`Welcome back, ${userRole}. System space initialized.`, 'success');
+        updateUserUI();
+        showView('hub');
+        $('.sidebar').show();
+        $('.main-container').removeClass('sidebar-collapsed');
+    } else {
+        $('#login-error').fadeIn();
+        showFlash("Authorization Failed: Invalid Credentials", "danger");
+    }
+}
+
+function logout() {
+    CURRENT_USER = { username: null, role: null, permissions: [] };
+    $('.sidebar').hide();
+    $('.main-container').addClass('sidebar-collapsed');
+    showView('login');
 }
 
 // --- CSV EXPORT ---
@@ -179,7 +303,7 @@ function buildNodeHtml(node, isReadOnly = false) {
                 <span class="lvl-indicator" style="background: ${color}"></span>
                 <span class="node-name flex-grow-1">${displayNum}${node.name}</span>
                 <span class="node-price mx-2">₹${Math.round(node.total_cost).toLocaleString()}</span>
-                ${!isReadOnly ? `
+                ${!isReadOnly && checkPermission('Core Access.Create') ? `
                 <button class="btn btn-sm text-primary p-0 mr-2" onclick="event.stopPropagation(); createNewBranch(event, '${node.id}')">
                     <i class="fa fa-plus-circle"></i>
                 </button>
@@ -243,7 +367,7 @@ function renderEditor(node) {
                     </div>
                 </div>
                 <div class="header-actions text-right">
-                    ${(node.level === 0) ? `
+                    ${(node.level === 0 && checkPermission('Core Access.Update')) ? `
                         <button class="btn btn-primary btn-sm font-weight-bold px-4 rounded-pill mb-2 shadow" onclick="markEstimationComplete()">
                             <i class="fa fa-check-circle mr-1"></i> SAVE & COMPLETE ESTIMATION
                         </button>
@@ -258,7 +382,7 @@ function renderEditor(node) {
                         <label class="input-label">UNIT COST (PROPOSED)</label>
                         <div class="input-group input-group-lg">
                             <div class="input-group-prepend"><span class="input-group-text border-0 bg-transparent">₹</span></div>
-                            <input type="number" id="own-cost-input" class="form-control font-weight-bold text-primary border-0 bg-transparent" value="${node.own_cost}" onchange="updateNodeAll('${node.id}')">
+                            <input type="number" id="own-cost-input" class="form-control font-weight-bold text-primary border-0 bg-transparent" value="${node.own_cost}" onchange="updateNodeAll('${node.id}')" ${!checkPermission('Core Access.Update') ? 'readonly' : ''}>
                         </div>
                     </div>
                 </div>
@@ -266,7 +390,7 @@ function renderEditor(node) {
                     <div class="glass-card p-4">
                         <label class="input-label">WEIGHT (GRAMS)</label>
                         <div class="input-group input-group-lg">
-                            <input type="number" id="weight-input" class="form-control font-weight-bold border-0 bg-transparent text-center" value="${node.weight}" onchange="updateNodeAll('${node.id}')">
+                            <input type="number" id="weight-input" class="form-control font-weight-bold border-0 bg-transparent text-center" value="${node.weight}" onchange="updateNodeAll('${node.id}')" ${!checkPermission('Core Access.Update') ? 'readonly' : ''}>
                             <div class="input-group-append"><span class="input-group-text border-0 bg-transparent small">G</span></div>
                         </div>
                     </div>
@@ -301,7 +425,7 @@ function renderEditor(node) {
 
             <div class="p-4 border rounded-lg bg-white mb-5 shadow-sm border-left" style="border-left-width: 6px !important; border-left-color: var(--primary) !important;">
                 <label class="input-label mb-3">MATERIAL ANALYTICS ASSOCIATION</label>
-                <select id="material-select" class="form-control form-control-lg border-0 bg-light mb-3" onchange="updateNodeAll('${node.id}')" style="border-radius: 12px; font-weight: 700;">
+                <select id="material-select" class="form-control form-control-lg border-0 bg-light mb-3" onchange="updateNodeAll('${node.id}')" style="border-radius: 12px; font-weight: 700;" ${!checkPermission('Core Access.Update') ? 'disabled' : ''}>
                     <option value="Unassigned">Select Commodity Grade...</option>
                     ${matOptions}
                 </select>
@@ -318,9 +442,11 @@ function renderEditor(node) {
 
             <div class="d-flex justify-content-between align-items-center mb-3">
                 <h6 class="input-label mb-0">SUB-ASSEMBLIES / CHILD NODES</h6>
+                ${checkPermission('Core Access.Delete') ? `
                 <button class="btn btn-danger btn-sm font-weight-bold px-3 rounded-lg" onclick="deleteNode('${node.id}')">
                     <i class="fa fa-trash-alt mr-1"></i> DELETE NODE
                 </button>
+                ` : ''}
             </div>
             
             <div class="branch-grid">
@@ -333,30 +459,45 @@ function renderEditor(node) {
                     </div>
                 `).join('')}
                 
+                ${checkPermission('Core Access.Create') ? `
                 <button class="btn btn-outline-primary p-3 d-flex flex-column justify-content-center align-items-center" 
                      style="border: 2px dashed var(--primary); background: rgba(108, 92, 231, 0.03); border-radius: 15px; min-height: 100px; transition: all 0.2s;" 
                      onclick="createNewBranch(null, '${node.id}')">
                     <i class="fa fa-plus-circle mb-2" style="font-size: 1.5rem;"></i>
                     <div class="font-weight-bold small">ADD CHILD NODE</div>
                 </button>
+                ` : ''}
             </div>
         </div>
     `);
 }
 
 async function markEstimationComplete() {
+    if (!checkPermission('Core Access.Update', 'finalize estimations')) return;
     if (!confirm("Are you sure you want to mark this project as complete? It will move to Cost Review archives.")) return;
-    await fetch('/api/project/complete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: currentTreeData.id })
-    });
-    addActivity(`Finalized Program: ${currentTreeData.name}`);
-    showView('hub');
+
+    try {
+        const response = await fetch('/api/project/complete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: currentTreeData.id })
+        });
+        const result = await response.json();
+        if (result.status === 'success') {
+            showFlash(`Program "${currentTreeData.name}" has been finalized.`, 'success');
+            addActivity(`Finalized Program: ${currentTreeData.name}`);
+            showView('hub');
+        } else {
+            showFlash("Failed to complete project: " + (result.message || "Unknown error"), "danger");
+        }
+    } catch (e) {
+        showFlash("Network error during project finalization.", "danger");
+    }
 }
 
 async function createNewBranch(event, parentId) {
     if (event) event.stopPropagation();
+    if (!checkPermission('Core Access.Create', 'create new nodes')) return;
     const name = prompt("Enter Name for new Branch:");
     if (!name) return;
     const isMetal = confirm("Enable metal calculation logic for this part?");
@@ -384,23 +525,27 @@ async function createNewBranch(event, parentId) {
 
 
 async function deleteNode(id) {
+    if (!checkPermission('Core Access.Delete', 'delete components')) return;
     if (!confirm("Remove this branch and all its costs?")) return;
 
-    const response = await fetch('/api/node/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: id })
-    });
-
-    const result = await response.json();
-
-    if (result.status === "error") {
-        alert(result.message || "Cannot delete this node");
-        return;
+    try {
+        const response = await fetch('/api/node/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: id })
+        });
+        const result = await response.json();
+        if (result.status === 'success') {
+            showFlash("Component and its descendants removed.", "success");
+            const parent = findParentInTree(currentTreeData, id);
+            await loadTree();
+            if (parent) selectNode(parent.id); else goHome();
+        } else {
+            showFlash("Failed to delete: " + (result.message || "Unauthorized"), "danger");
+        }
+    } catch (e) {
+        showFlash("Network error during component deletion.", "danger");
     }
-
-    await loadTree();
-    selectNode(currentTreeData.id);
 }
 
 
@@ -409,6 +554,8 @@ async function startNewProject() {
 }
 
 async function confirmCreateProject() {
+    if (!checkPermission('Core Access.Create', 'initialize new projects')) return;
+
     const config = {
         brand: $('#cfg-brand').val() || "Unknown",
         model: $('#cfg-model').val() || "Model",
@@ -430,6 +577,7 @@ async function confirmCreateProject() {
 }
 
 async function updateNodeAll(id) {
+    if (!checkPermission('Core Access.Update', 'modify cost data')) return;
     const payload = {
         id: id,
         own_cost: parseFloat($('#own-cost-input').val()) || 0,
@@ -472,14 +620,26 @@ function renderSpecs(project) {
 
 async function deleteProject(id, event) {
     if (event) event.stopPropagation();
+    if (!checkPermission('Core Access.Delete', 'delete programs')) return;
     if (!confirm("Delete this entire project? This cannot be undone.")) return;
-    await fetch('/api/project/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: id })
-    });
-    addActivity(`Deleted project: ${id}`);
-    loadProjectsForHub();
+
+    try {
+        const response = await fetch('/api/project/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: id })
+        });
+        const result = await response.json();
+        if (result.status === 'success') {
+            showFlash("Program successfully removed from database.", "success");
+            addActivity(`Deleted project: ${id}`);
+            loadProjectsForHub();
+        } else {
+            showFlash("Deletion failed: " + (result.message || "Unauthorized"), "danger");
+        }
+    } catch (e) {
+        showFlash("Communication error during deletion.", "danger");
+    }
 }
 
 async function selectAndPulse(id, targetView = 'editor') {
@@ -537,11 +697,12 @@ async function loadProjectsForHub() {
                     <div class="font-weight-bold" style="font-size: 1.1rem;">${p.name}</div>
                     <div class="text-muted" style="font-size: 13px;">Cost: <span class="text-dark font-weight-bold">₹${Math.round(p.total_cost).toLocaleString()}</span> | BOM: ${p.tracked_parts}/${p.part_count}</div>
                 </div>
-                <!-- Action buttons -->
                 <div class="d-flex">
+                    ${checkPermission('Core Access.Delete') ? `
                     <button class="btn btn-sm btn-outline-danger border-0 p-2 ml-2" onclick="deleteProject('${p.id}', event)" title="Delete Project">
                         <i class="fa fa-trash-alt"></i>
                     </button>
+                    ` : ''}
                 </div>
             </div>
         `;
@@ -596,7 +757,7 @@ async function renderReview() {
                     <div class="p-3 border-bottom bg-light d-flex justify-content-between align-items-center">
                         <h6 class="mb-0 font-weight-bold small"><i class="fa fa-sitemap mr-2"></i>B.O.M. ARCHITECTURE</h6>
                     </div>
-                    <div class="p-2 overflow-auto flex-grow-1">
+                    <div class="p-2 review-tree-container">
                         <div id="reviewTreeView"></div>
                     </div>
                 </div>
@@ -889,8 +1050,12 @@ async function renderProjectReport() {
 }
 
 $(document).ready(async () => {
+    // Application Entry Point: Login Gateway
+    showView('login');
+    $('.sidebar').hide();
+    $('.main-container').addClass('sidebar-collapsed');
+
     await loadMaterials();
-    showView('hub');
 });
 function toggleReviewHeight(event) {
     if (event) event.stopPropagation();
@@ -905,4 +1070,249 @@ function toggleReviewHeight(event) {
         $container.css('max-height', 'none');
         $icon.addClass('active');
     }
+}
+
+// --- ADMIN PORTAL LOGIC ---
+function loginAdmin() {
+    const user = $('#admin-username').val();
+    const pass = $('#admin-password').val();
+
+    console.log("Attempting login for:", user);
+
+    if (user === 'admin' && pass === 'admin123') {
+        CURRENT_USER = { username: 'admin', role: 'admin', permissions: ['*'] };
+        // Set UI label
+        updateUserUI();
+        showView('admin-panel');
+    } else if (MockRoles[user] && pass === DEFAULT_PASS) {
+        CURRENT_USER = {
+            username: user,
+            role: user,
+            permissions: MockRoles[user].permissions
+        };
+        updateUserUI();
+        alert(`Logged in as ${user}. UI will now restrict actions based on your role.`);
+        showView('hub');
+    } else {
+        $('#admin-login-error').fadeIn();
+    }
+}
+
+function updateUserUI() {
+    const name = CURRENT_USER.role || CURRENT_USER.username || "User";
+    const initials = name.split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase();
+
+    $('#user-initials').text(initials);
+    $('#user-display-name').text(name);
+
+    // Dynamic sidebar control for enterprise modules
+    if (CURRENT_USER.role === 'admin' || CURRENT_USER.permissions.includes('*')) {
+        $('.nav-item[onclick*="admin-panel"]').show();
+    } else {
+        $('.nav-item[onclick*="admin-panel"]').hide();
+    }
+
+    addActivity(`System Login: ${CURRENT_USER.username}`);
+}
+
+// --- ADMIN ENTERPRISE PORTAL LOGIC ---
+function renderAdminEnterprisePortal() {
+    renderRoleList();
+    if (CURRENT_SELECTED_ROLE) {
+        loadRoleIntoWorkspace(CURRENT_SELECTED_ROLE);
+    } else {
+        closeRoleWorkspace();
+    }
+}
+
+function renderRoleList() {
+    const $list = $('#admin-roles-list');
+    $list.empty();
+
+    const searchVal = $('#admin-role-search').val() ? $('#admin-role-search').val().toLowerCase() : '';
+
+    Object.keys(MockRoles).forEach(rName => {
+        if (rName.toLowerCase().includes(searchVal)) {
+            const role = MockRoles[rName];
+            const activeClass = CURRENT_SELECTED_ROLE === rName ? 'active' : '';
+            const statusClass = role.status === 'active' ? 'status-active' : 'status-inactive';
+
+            $list.append(`
+                <div class="role-list-item ${activeClass}" onclick="event.stopPropagation(); loadRoleIntoWorkspace('${rName}')">
+                    <div class="role-info" style="pointer-events: none;">
+                        <h6>${rName}</h6>
+                        <small>${role.pattern ? 'Item Pattern: ' + role.pattern : 'Global Role'}</small>
+                    </div>
+                    <div class="status-indicator ${statusClass}" style="pointer-events: none;">${role.status}</div>
+                </div>
+            `);
+        }
+    });
+}
+
+function filterAdminRoles() {
+    renderRoleList();
+}
+
+function loadRoleIntoWorkspace(rName) {
+    CURRENT_SELECTED_ROLE = rName;
+    const role = MockRoles[rName];
+
+    $('.role-list-item').removeClass('active');
+    $(`.role-list-item:contains("${rName}")`).addClass('active');
+
+    $('#role-workspace-empty').hide();
+    $('#role-workspace-content').show();
+
+    $('#role-display-name').text(rName);
+    $('#role-display-status').text(role.status.toUpperCase())
+        .removeClass('status-active status-inactive')
+        .addClass(role.status === 'active' ? 'status-active' : 'status-inactive');
+
+    $('#role-edit-desc').val(role.description || '');
+    $('#role-edit-status').val(role.status || 'active');
+    $('#role-display-user-count').text((role.users || 0) + ' Users');
+    $('#role-display-created').text(role.created || 'Unknown');
+    $('#role-display-modified').text(role.modified || 'Never');
+
+    renderPermissionsAccordion(rName);
+
+    // Disable delete for immutable admin
+    if (role.immutable) {
+        $('#admin-delete-role-btn').hide();
+        $('#role-edit-status').attr('disabled', true);
+    } else {
+        $('#admin-delete-role-btn').show();
+        $('#role-edit-status').attr('disabled', false);
+    }
+}
+
+function renderPermissionsAccordion(rName) {
+    const $accordion = $('#admin-permissions-accordion');
+    $accordion.empty();
+    const role = MockRoles[rName];
+
+    Object.keys(PERMISSION_GROUPS).forEach((group, index) => {
+        const perms = PERMISSION_GROUPS[group];
+        let permsHtml = '';
+
+        Object.keys(perms).forEach(pKey => {
+            const fullKey = `${group}.${pKey}`;
+            const hasPerm = role.permissions.includes('*') || role.permissions.includes(fullKey) || role.permissions.includes(pKey);
+            const disabled = role.immutable ? 'disabled' : '';
+
+            permsHtml += `
+                <div class="perm-checkbox-item" title="${perms[pKey]}">
+                    <input type="checkbox" id="chk-${group}-${pKey}" ${hasPerm ? 'checked' : ''} ${disabled} 
+                           onchange="updateRolePermission('${rName}', '${fullKey}', this.checked)">
+                    <label for="chk-${group}-${pKey}" class="mb-0">${pKey}</label>
+                </div>
+            `;
+        });
+
+        $accordion.append(`
+            <div class="accordion-group">
+                <div class="accordion-header" onclick="const $c = $(this).next(); if ($c.is(':visible')) { $c.slideUp(); } else { $c.slideDown().css('display', 'grid'); }">
+                    <span>${group}</span>
+                    <i class="fa fa-chevron-down small"></i>
+                </div>
+                <div class="accordion-content">
+                    ${permsHtml}
+                </div>
+            </div>
+        `);
+    });
+}
+
+function updateRolePermission(rName, fullKey, checked) {
+    if (!MockRoles[rName]) return;
+    const role = MockRoles[rName];
+    if (checked) {
+        if (!role.permissions.includes(fullKey)) role.permissions.push(fullKey);
+    } else {
+        role.permissions = role.permissions.filter(p => p !== fullKey && p !== '*');
+    }
+}
+
+function saveRoleChanges() {
+    if (!CURRENT_SELECTED_ROLE) return;
+    const role = MockRoles[CURRENT_SELECTED_ROLE];
+
+    role.description = $('#role-edit-desc').val();
+    role.status = $('#role-edit-status').val();
+    role.modified = new Date().toLocaleString();
+
+    alert(`Changes saved for role: ${CURRENT_SELECTED_ROLE}`);
+    renderRoleList();
+    loadRoleIntoWorkspace(CURRENT_SELECTED_ROLE);
+}
+
+function deleteCurrentRole() {
+    if (!CURRENT_SELECTED_ROLE) return;
+    if (MockRoles[CURRENT_SELECTED_ROLE].immutable) return alert("System roles cannot be deleted.");
+
+    if (confirm(`Are you sure you want to permanent delete the role: ${CURRENT_SELECTED_ROLE}?`)) {
+        delete MockRoles[CURRENT_SELECTED_ROLE];
+        CURRENT_SELECTED_ROLE = null;
+        renderAdminEnterprisePortal();
+    }
+}
+
+function closeRoleWorkspace() {
+    CURRENT_SELECTED_ROLE = null;
+    $('#role-workspace-content').hide();
+    $('#role-workspace-empty').show();
+    $('.role-list-item').removeClass('active');
+}
+
+function openAddRoleModal() {
+    $('#role-creation-form').show();
+    $('#role-creation-success').hide();
+    $('#addRoleModal').modal('show');
+}
+
+function togglePatternInput() {
+    const type = $('#new-role-type').val();
+    if (type === 'item') {
+        $('#pattern-input-group').show();
+    } else {
+        $('#pattern-input-group').hide();
+    }
+}
+
+function createNewRole() {
+    const name = $('#new-role-name').val();
+    const type = $('#new-role-type').val();
+    const pattern = $('#new-role-pattern').val();
+
+    if (!name) return alert("Role name is required.");
+    if (type === 'item' && !pattern) return alert("Pattern is required for item roles.");
+
+    MockRoles[name] = {
+        description: "",
+        status: "active",
+        permissions: [],
+        created: new Date().toLocaleDateString(),
+        modified: "Just now",
+        users: 0
+    };
+
+    if (type === 'item') {
+        MockRoles[name].pattern = pattern;
+    }
+
+    // Register in MockUsers for login
+    const username = name.toLowerCase().replace(/\s+/g, '_');
+    const password = Math.random().toString(36).slice(-8);
+    MockUsers[username] = { pass: password, role: name };
+
+    // Prepare success view
+    $('#role-creation-form').hide();
+    $('#success-role-name').text(name);
+    $('#success-username').text(username);
+    $('#success-password').text(password);
+    $('#role-creation-success').fadeIn();
+
+    renderRoleList();
+    loadRoleIntoWorkspace(name);
 }

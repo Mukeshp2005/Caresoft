@@ -124,7 +124,6 @@ docker exec -it caresoft_postgres psql -U caresoft_user -d caresoft_db
 \dt
 
 # View projects
-SELECT * FROM projects;
 
 # View nodes
 SELECT * FROM nodes;

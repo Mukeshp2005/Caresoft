@@ -123,7 +123,7 @@ docker compose logs -f
 # Or view logs from specific service
 docker compose logs web -f
 docker compose logs db -f
-```
+```db
 
 **Look for:**
 ```
